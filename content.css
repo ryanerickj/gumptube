@@ -472,7 +472,7 @@ select.gt-input-mini { width: auto; }
 
 /* --------------------------------------------------- aba cheia (app.html) */
 
-.gt-card.gt-app { max-width: 1140px; margin: 20px auto 0; }
+.gt-card.gt-app { width: 100%; max-width: none; margin: 0; border-left: 0; border-right: 0; border-radius: 0; }
 .gt-card.gt-app .gt-handle, .gt-card.gt-app .gt-grip, .gt-card.gt-app .gt-collapse:not(.gt-expand) { display: none; }
 .gt-card.gt-app .gt-expand { display: none; }   /* já estamos na aba cheia */
 .gt-card.gt-app .gt-body { height: auto; min-height: 420px; max-height: calc(100vh - 150px); }
@@ -535,7 +535,10 @@ select.gt-input-mini { width: auto; }
 .gt-arsenal > .gt-tabs { margin-bottom: 6px; }
 
 /* Tela cheia de Screenshot: visual de grade do YouTube, com ações concentradas no preview. */
-.gt-card.gt-app .gt-gallery-grid { grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+.gt-card.gt-app .gt-gallery-grid { grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; padding: 6px 20px 20px; }
+.gt-card.gt-app .gt-gallery-grid.gt-preview-compacto { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.gt-card.gt-app .gt-gallery-grid.gt-preview-medio { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.gt-card.gt-app .gt-gallery-grid.gt-preview-amplo { grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); }
 .gt-gallery-filters { margin: 0 12px; padding-left: 0; padding-right: 0; }
 .gt-card.gt-app .gt-gallery .gt-frame-bar { min-height: 35px; padding: 7px 8px; }
 .gt-card.gt-app .gt-gallery .gt-frame-bar .gt-note { margin-left: auto; color: var(--gt-accent); font-weight: 700; }

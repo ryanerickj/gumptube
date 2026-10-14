@@ -873,15 +873,18 @@
     const selecionados = new Set();
     let ordem = 'tempo';
     let filtro = 'todos';
+    let tamanhoPreview = 'amplo';
 
     const cabecalho = el('p', { class: 'gt-note', style: { padding: '2px 12px 0' } });
     const status = el('p', { class: 'gt-note', style: { padding: '0 12px' } }, 'Carregando capturas…');
     const filtros = el('div', { class: 'gt-tabs gt-gallery-filters' });
+    const tamanhosPreview = el('div', { class: 'gt-chips gt-preview-size' });
     const barra = el('div', { class: 'gt-toolbar', style: { display: 'none' } },
       el('select', { class: 'gt-input gt-input-mini', onchange: (event) => { ordem = event.target.value; render(); } },
         el('option', { value: 'tempo' }, 'Por tempo'),
         el('option', { value: 'score' }, 'Melhores primeiro')
       ),
+      el('span', { class: 'gt-note' }, 'Preview'), tamanhosPreview,
       el('button', { class: 'gt-chip', onclick: selecionarTudo }, 'Selecionar tudo'),
       el('button', { class: 'gt-chip', onclick: baixarZip }, '⇩ Seleção em .zip'),
       el('button', { class: 'gt-chip', onclick: salvarSelecao }, '★ Seleção no Arsenal')
@@ -907,6 +910,19 @@
       const melhores = melhoresKeys();
       const filtrada = metas.filter((m) => filtro === 'todos' || (filtro === 'melhores' && melhores.has(m.key)) || (filtro === 'manual' && m.manual) || (filtro === 'camera' && m.lookingAtCamera));
       return filtrada.sort((a, b) => (ordem === 'score' ? (b.score ?? -1) - (a.score ?? -1) : a.time - b.time));
+    }
+    function renderTamanhosPreview() {
+      const tamanhos = [
+        { id: 'compacto', label: 'P', title: 'Thumbs compactas' },
+        { id: 'medio', label: 'M', title: 'Thumbs médias' },
+        { id: 'amplo', label: 'G', title: 'Thumbs grandes' }
+      ];
+      GT.clear(tamanhosPreview);
+      tamanhos.forEach((item) => tamanhosPreview.append(el('button', {
+        class: `gt-chip${item.id === tamanhoPreview ? ' active' : ''}`,
+        title: item.title,
+        onclick: () => { tamanhoPreview = item.id; render(); }
+      }, item.label)));
     }
     function renderFiltros() {
       const labels = { todos: 'Todos', melhores: 'Melhores', manual: 'Manuais', camera: 'Câmera' };
@@ -956,7 +972,8 @@
       status.textContent = `${metas.length} prints prontos. Clique em um print para abrir o preview; use a caixa para selecionar em lote.`;
     }
     function render() {
-      renderFiltros(); GT.clear(grid); imgEls.clear();
+      renderFiltros(); renderTamanhosPreview(); GT.clear(grid); imgEls.clear();
+      grid.className = `gt-grid gt-gallery-grid gt-preview-${tamanhoPreview}`;
       const lista = listaOrdenada();
       if (!lista.length) { grid.append(el('div', { class: 'gt-empty' }, 'Nenhum print neste filtro.')); return; }
       for (const meta of lista) {
