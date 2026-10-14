@@ -1,0 +1,99 @@
+{
+  "manifest_version": 3,
+  "name": "Gumptube",
+  "version": "0.4.1",
+  "description": "Plataforma visual-estratégica para YouTube: Arsenal de thumbnails, Screenshot de frames e Dados do vídeo — tudo local.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Gumptube",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "permissions": [
+    "storage",
+    "downloads",
+    "unlimitedStorage",
+    "scripting",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://youtube.com/*",
+    "https://i.ytimg.com/*",
+    "https://*.ytimg.com/*",
+    "https://web.archive.org/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://youtube.com/*"
+      ],
+      "js": [
+        "src/core.js",
+        "src/zip.js",
+        "src/db.js",
+        "src/analysis.js",
+        "src/data.js",
+        "src/phrases.js",
+        "src/captions.js",
+        "src/style.js",
+        "src/view-launcher.js",
+        "src/thumb-search.js",
+        "src/view-arsenal.js",
+        "src/view-screenshot.js",
+        "src/view-dados.js",
+        "src/view-frases.js",
+        "src/panel.js",
+        "src/grid-actions.js",
+        "src/player-button.js",
+        "src/content.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://youtube.com/*"
+      ],
+      "js": [
+        "src/page-quality.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "app.html",
+        "analyzer.html",
+        "vendor/*",
+        "models/*",
+        "wasm/*",
+        "content.css",
+        "icons/*"
+      ],
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://youtube.com/*"
+      ]
+    }
+  ]
+}
