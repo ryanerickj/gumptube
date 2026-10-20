@@ -544,3 +544,12 @@ select.gt-input-mini { width: auto; }
 .gt-card.gt-app .gt-gallery .gt-frame-bar .gt-note { margin-left: auto; color: var(--gt-accent); font-weight: 700; }
 .gt-card.gt-app .gt-gallery .gt-item img { cursor: zoom-in; transition: opacity .12s ease; }
 .gt-card.gt-app .gt-gallery .gt-item:hover img { opacity: .88; }
+
+/* Lista de vídeos com capturas guardadas (aba cheia): cada vídeo vira um card com a capa */
+.gt-card.gt-app .gt-cover-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; padding: 8px 20px 24px; }
+.gt-cover { display: flex; flex-direction: column; gap: 6px; padding: 0 0 10px; text-align: left; cursor: pointer; background: #1b1b1b; border: 1px solid #2c2c2c; border-radius: 10px; overflow: hidden; color: inherit; font: inherit; }
+.gt-cover:hover { border-color: #ff4d5e; }
+.gt-cover-thumb { display: block; aspect-ratio: 16 / 9; background: #111; }
+.gt-cover-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.gt-cover b { padding: 8px 10px 0; font-size: 13px; line-height: 1.3; }
+.gt-cover .gt-note { padding: 0 10px; }

@@ -30,6 +30,7 @@
     captures: {
       clear: (videoId) => rpc('captureClear', [videoId], 60000),
       put: (row) => rpc('capturePut', [row], 60000),
+      update: (key, patch) => rpc('captureUpdate', [key, patch], 60000),
       list: (videoId) => rpc('captureList', [videoId], 60000),
       get: (key) => rpc('captureGet', [key], 60000),
       index: () => rpc('captureIndex', [], 60000)

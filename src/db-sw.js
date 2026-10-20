@@ -4,7 +4,7 @@
 // falam com ESTE banco por RPC ('gt:db'), e exportar/importar vive aqui também.
 
 const DB_NAME = 'gumptube';
-const DB_VERSION = 2;   // v2: store 'captures' — prints da varredura disponíveis na aba cheia
+const DB_VERSION = 3;   // v2: store 'captures' — prints da varredura. v3: 'captureMeta' (metadados + miniatura, sem a imagem cheia) — a galeria lista sem carregar os prints
 
 const STORES = {
   items: { keyPath: 'id', indexes: [['createdAt', 'createdAt'], ['videoId', 'videoId'], ['origin', 'origin']] },
@@ -16,7 +16,8 @@ const STORES = {
   thumbs: { keyPath: 'key', indexes: [['videoId', 'videoId'], ['firstSeen', 'firstSeen']] },
   // Última varredura de cada vídeo (imagens em resolução cheia). É cache de trabalho —
   // fica FORA do exportar/importar de propósito, senão o arquivo de banco incharia gigas.
-  captures: { keyPath: 'key', indexes: [['videoId', 'videoId'], ['takenAt', 'takenAt']] }
+  captures: { keyPath: 'key', indexes: [['videoId', 'videoId'], ['takenAt', 'takenAt']] },
+  captureMeta: { keyPath: 'key', indexes: [['videoId', 'videoId'], ['takenAt', 'takenAt']] }
 };
 
 let dbPromise = null;
@@ -24,12 +25,24 @@ let dbPromise = null;
 function openDb() {
   dbPromise ||= new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result;
       for (const [name, spec] of Object.entries(STORES)) {
         if (db.objectStoreNames.contains(name)) continue;
         const store = db.createObjectStore(name, { keyPath: spec.keyPath });
         for (const [indexName, path] of spec.indexes) store.createIndex(indexName, path);
+      }
+      // v2 -> v3: copia os metadados das capturas já guardadas (sem as imagens) para a captureMeta
+      if (event.oldVersion > 0 && event.oldVersion < 3 && db.objectStoreNames.contains('captures')) {
+        const origem = request.transaction.objectStore('captures');
+        const destino = request.transaction.objectStore('captureMeta');
+        origem.openCursor().onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (!cursor) return;
+          const { dataUrl, ...meta } = cursor.value;
+          destino.put(meta);
+          cursor.continue();
+        };
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -293,35 +306,65 @@ export const dbOps = {
   thumbSample,
 
   /* ---- capturas da varredura (Screenshot → aba cheia) ---- */
+  // 'captures' guarda a imagem cheia; 'captureMeta' guarda o resto (com miniatura). A galeria
+  // lê só a captureMeta, então abrir a lista de vídeos não carrega imagem nenhuma.
   captureClear: async (videoId) => {
-    const all = (await tx('captures', 'readonly', (store) => store.getAll())) || [];
-    for (const row of all) {
-      if (row.videoId === videoId) await tx('captures', 'readwrite', (store) => store.delete(row.key));
-    }
-    return { removidos: all.filter((row) => row.videoId === videoId).length };
+    const metas = (await tx('captureMeta', 'readonly', (store) => store.getAll())) || [];
+    const alvo = metas.filter((row) => row.videoId === videoId);
+    if (!alvo.length) return { removidos: 0 };
+    const db = await openDb();
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction(['captures', 'captureMeta'], 'readwrite');
+      for (const row of alvo) { transaction.objectStore('captures').delete(row.key); transaction.objectStore('captureMeta').delete(row.key); }
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    return { removidos: alvo.length };
   },
-  capturePut: (row) => tx('captures', 'readwrite', (store) => store.put(row)).then(() => ({ ok: true })),
-  // lista SEM as imagens: os dataUrls são pesados e viajam um a um via captureGet
+  // grava a imagem cheia e os metadados numa única transação
+  capturePut: async (row) => {
+    const { dataUrl, ...meta } = row;
+    const db = await openDb();
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction(['captures', 'captureMeta'], 'readwrite');
+      transaction.objectStore('captures').put(row);
+      transaction.objectStore('captureMeta').put(meta);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    return { ok: true };
+  },
+  // atualiza só campos de metadado (score, rosto, miniatura) sem reenviar a imagem
+  captureUpdate: async (key, patch) => {
+    const atual = await tx('captureMeta', 'readonly', (store) => store.get(key));
+    if (!atual) return { ok: false };
+    await tx('captureMeta', 'readwrite', (store) => store.put({ ...atual, ...patch }));
+    return { ok: true };
+  },
   captureList: async (videoId) => {
-    const all = (await tx('captures', 'readonly', (store) => store.getAll())) || [];
-    return all
-      .filter((row) => row.videoId === videoId)
-      .sort((a, b) => a.time - b.time)
-      .map(({ dataUrl, ...meta }) => meta);
+    const all = (await tx('captureMeta', 'readonly', (store) => store.getAll())) || [];
+    return all.filter((row) => row.videoId === videoId).sort((a, b) => a.time - b.time);
   },
   captureGet: (key) => tx('captures', 'readonly', (store) => store.get(key)),
-  // índice do que existe guardado, por vídeo — para a galeria sem ?video= na URL
+  // índice por vídeo: total, título, data e a capa (melhor frame com miniatura)
   captureIndex: async () => {
-    const all = (await tx('captures', 'readonly', (store) => store.getAll())) || [];
+    const all = (await tx('captureMeta', 'readonly', (store) => store.getAll())) || [];
     const porVideo = new Map();
     for (const row of all) {
-      const atual = porVideo.get(row.videoId) || { videoId: row.videoId, videoTitle: row.videoTitle || '', total: 0, takenAt: 0 };
+      const atual = porVideo.get(row.videoId) || { videoId: row.videoId, videoTitle: '', total: 0, takenAt: 0, coverKey: null, thumb: null, coverScore: -2 };
       atual.total++;
       atual.takenAt = Math.max(atual.takenAt, row.takenAt || 0);
       if (row.videoTitle) atual.videoTitle = row.videoTitle;
+      const score = Number.isFinite(row.score) ? row.score : -1;
+      if (row.thumb && score > atual.coverScore) { atual.coverScore = score; atual.coverKey = row.key; atual.thumb = row.thumb; }
+      if (!atual.coverKey && !atual.coverKey2) atual.coverKey2 = row.key;   // capa de reserva (sem miniatura)
       porVideo.set(row.videoId, atual);
     }
-    return [...porVideo.values()].sort((a, b) => b.takenAt - a.takenAt);
+    return [...porVideo.values()]
+      .map(({ coverScore, coverKey2, ...item }) => ({ ...item, coverKey: item.coverKey || coverKey2 || null }))
+      .sort((a, b) => b.takenAt - a.takenAt);
   },
 
   exportAll,

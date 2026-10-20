@@ -96,7 +96,7 @@
           const previewUrl = await new Promise((resolve) => light.toBlob((b) => resolve(b ? URL.createObjectURL(b) : fullUrl), 'image/jpeg', 0.86));
           blobUrls.push(fullUrl, previewUrl);
 
-          const quality = A().measureQuality(canvas);
+          const quality = A().measureQuality(light);
           const frame = {
             id: `m${Date.now()}`,
             time,
@@ -124,7 +124,7 @@
           tab = 'manual';
           render();
           ctx.setStatus(`Frame manual em ${GT.timeLabel(time)} · ${canvas.width}×${canvas.height}`);
-          persistirCapturas();   // mantém a tela cheia (⧉) em dia com os manuais também
+          salvarNaTelaCheia(frame);   // a tela cheia (⧉) recebe só o print novo
 
           // análise facial em segundo plano, sem travar a captura seguinte
           A().initAnalyzer()
@@ -337,6 +337,7 @@
         running = true; cancelled = false;
         releaseBlobs();                      // devolve a memória da varredura anterior
         frames = []; selected.clear();
+        iniciarPersistencia();
         runButton.textContent = 'Cancelar';
         ctx.setProgress(0);
         renderChips(); render();
@@ -378,7 +379,7 @@
             const previewUrl = await new Promise((resolve) => light.toBlob((b) => resolve(b ? URL.createObjectURL(b) : fullUrl), 'image/jpeg', 0.86));
             blobUrls.push(fullUrl, previewUrl);
 
-            const quality = A().measureQuality(canvas);
+            const quality = A().measureQuality(light);
             found.push({
               id: `f${index}`,
               time,
@@ -402,6 +403,7 @@
               faceDone: false,
               score: quality.score
             });
+            salvarNaTelaCheia(found[found.length - 1]);
             frames = A().clusterFrames(found, step);
           };
 
@@ -494,6 +496,7 @@
               /* frame sem rosto detectável segue com a pontuação de qualidade */
             }
             frame.faceDone = true;
+            atualizarNaTelaCheia(frame);
             ctx.setProgress(60 + Math.round(((i + 1) / candidates.length) * 40));
             if (i % 5 === 0 || i === candidates.length - 1) {
               ctx.setStatus(`Analisando rosto e olhar ${i + 1}/${candidates.length}`);
@@ -523,7 +526,7 @@
           renderChips(); render();
           // No finally de propósito: varredura concluída, CANCELADA ou com erro parcial —
           // o que estiver capturado vai para a tela cheia (⧉) do mesmo jeito.
-          persistirCapturas();
+          concluirPersistencia();
         }
       }
 
@@ -553,48 +556,74 @@
         });
       }
 
-      // Guarda a varredura no banco central, em resolução cheia — é o que a aba cheia (⧉)
-      // mostra depois, mesmo com a aba do YouTube fechada. Substitui a varredura anterior
-      // DESTE vídeo (o acervo permanente continua sendo o Arsenal).
+      // Gravação incremental no banco central: cada print vai para a tela cheia (⧉) assim que é
+      // capturado, em fila (uma gravação por vez) e sem esperar o fim da varredura. Antes, cada
+      // captura manual regravava TODOS os prints da sessão, o que travava a tela.
       const LIMITE_TELA_CHEIA = 500;
-      let persistindo = false;
-      async function persistirCapturas() {
-        if (!ctx.videoId || persistindo || !frames.length) return;
-        persistindo = true;
-        const lista = [...frames].sort((a, b) => a.time - b.time).slice(0, LIMITE_TELA_CHEIA);
-        try {
-          const tituloVideo = GT.pageTitle();
-          const canal = GT.pageChannel() || '';
-          await GT.db.captures.clear(ctx.videoId);
-          let salvos = 0;
-          for (const frame of lista) {
-            if (!alive) return;
-            if (!frame.fullBlob) continue;   // sem imagem cheia não há o que guardar
-            await GT.db.captures.put({
-              key: `${ctx.videoId}|${Math.round(frame.time * 1000)}`,
-              videoId: ctx.videoId,
-              time: frame.time,
-              takenAt: Date.now(),
-              videoTitle: tituloVideo,
-              channel: canal,
-              dataUrl: await blobToDataUrl(frame.fullBlob),
-              width: frame.width,
-              height: frame.height,
-              hash: frame.hash || '',
-              score: frame.score ?? null,
-              manual: !!frame.manual,
-              lookingAtCamera: !!frame.face?.lookingAtCamera
-            });
-            salvos++;
+      let gravados = 0;
+      let filaGravacao = Promise.resolve();
+      let falhaGravacao = null;
+      const chaveTelaCheia = (frame) => `${ctx.videoId}|${Math.round(frame.time * 1000)}`;
+
+      function iniciarPersistencia() {
+        gravados = 0; falhaGravacao = null;
+        if (!ctx.videoId) { filaGravacao = Promise.resolve(); return; }
+        // a varredura nova substitui a anterior DESTE vídeo (o acervo permanente é o Arsenal)
+        filaGravacao = GT.db.captures.clear(ctx.videoId).catch((error) => { falhaGravacao = error; });
+      }
+
+      function enfileirar(task) {
+        filaGravacao = filaGravacao
+          .then(task)
+          .catch((error) => { falhaGravacao = falhaGravacao || error; });
+        return filaGravacao;
+      }
+
+      function salvarNaTelaCheia(frame) {
+        if (!ctx.videoId || !frame?.fullBlob || gravados >= LIMITE_TELA_CHEIA) return;
+        gravados++;
+        const tituloVideo = GT.pageTitle();
+        const canal = GT.pageChannel() || '';
+        enfileirar(async () => {
+          if (!alive) return;
+          const dataUrl = await blobToDataUrl(frame.fullBlob);
+          // miniatura leve (640 px) para a lista de vídeos — não precisa carregar a imagem cheia
+          const thumb = frame.previewUrl ? await blobToDataUrl(await (await fetch(frame.previewUrl)).blob()) : null;
+          await GT.db.captures.put({
+            key: chaveTelaCheia(frame),
+            videoId: ctx.videoId,
+            time: frame.time,
+            takenAt: Date.now(),
+            videoTitle: tituloVideo,
+            channel: canal,
+            dataUrl,
+            thumb,
+            width: frame.width,
+            height: frame.height,
+            hash: frame.hash || '',
+            score: frame.score ?? null,
+            manual: !!frame.manual,
+            lookingAtCamera: !!frame.face?.lookingAtCamera
+          });
+        });
+      }
+
+      // score e rosto mudam depois da análise facial: só os metadados são reenviados
+      function atualizarNaTelaCheia(frame) {
+        if (!ctx.videoId || !frame) return;
+        const key = chaveTelaCheia(frame);
+        enfileirar(() => GT.db.captures.update(key, { score: frame.score ?? null, lookingAtCamera: !!frame.face?.lookingAtCamera }));
+      }
+
+      function concluirPersistencia() {
+        filaGravacao.then(() => {
+          if (!alive || !ctx.videoId) return;
+          if (falhaGravacao) ctx.setStatus(`Capturas feitas, mas não guardei tudo para a tela cheia: ${falhaGravacao.message || falhaGravacao}`);
+          else if (gravados) {
+            const corte = frames.length > LIMITE_TELA_CHEIA ? ` (limite de ${LIMITE_TELA_CHEIA}; a grade aqui segue completa)` : '';
+            ctx.setStatus(`${gravados} prints disponíveis na tela cheia ⧉${corte}`);
           }
-          const corte = frames.length > LIMITE_TELA_CHEIA ? ` (limite de ${LIMITE_TELA_CHEIA}; a grade aqui segue completa)` : '';
-          ctx.setStatus(`${salvos} prints disponíveis na tela cheia ⧉${corte}`);
-        } catch (error) {
-          // honesto, sem atrapalhar: a captura em si deu certo, só o espelho da tela cheia falhou
-          ctx.setStatus(`Capturas feitas, mas não guardei para a tela cheia: ${error.message || error}`);
-        } finally {
-          persistindo = false;
-        }
+        });
       }
 
       async function copyFrame(frame) {
@@ -973,11 +1002,31 @@
       try { indice = await GT.db.captures.index(); } catch (error) { status.textContent = `Não consegui consultar o banco de capturas: ${error.message || error}`; return; }
       if (!alive) return;
       GT.clear(grid); GT.clear(filtros); barra.style.display = 'none';
+      grid.className = 'gt-cover-grid';
       if (!indice.length) { status.textContent = 'Nenhum print guardado ainda. Capture na página do vídeo e a varredura aparecerá aqui automaticamente.'; return; }
       status.textContent = videoId ? 'Este vídeo ainda não tem prints. Varreduras recentes:' : 'Escolha uma varredura guardada:';
-      for (const item of indice) grid.append(el('button', { class: 'gt-chip', style: { textAlign: 'left', whiteSpace: 'normal', lineHeight: '1.4' }, onclick: () => {
-        videoId = item.videoId; filtro = 'todos'; selecionados.clear(); imagens.clear(); imgEls.clear(); carregar();
-      } }, `${item.videoTitle || item.videoId} — ${item.total} prints · ${rotuloTempo(item.takenAt)}`));
+      for (const item of indice) {
+        const img = el('img', { alt: '', src: item.thumb || GT.PIXEL || 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==' });
+        grid.append(el('button', { class: 'gt-cover', title: 'Abrir as capturas deste vídeo', onclick: () => {
+          videoId = item.videoId; filtro = 'todos'; selecionados.clear(); imagens.clear(); imgEls.clear(); carregar();
+        } },
+          el('span', { class: 'gt-cover-thumb' }, img),
+          el('b', {}, item.videoTitle || item.videoId),
+          el('span', { class: 'gt-note' }, `${item.total} prints · ${rotuloTempo(item.takenAt)}`)
+        ));
+        if (!item.thumb && item.coverKey) gerarCapa(item.coverKey, img);   // legado: gera a capa uma vez
+      }
+    }
+    // Registros guardados antes da miniatura: gera a capa a partir da imagem e grava de volta,
+    // para acontecer só uma vez por vídeo.
+    async function gerarCapa(key, img) {
+      try {
+        const row = await GT.db.captures.get(key);
+        if (!row?.dataUrl || !alive) return;
+        const thumb = await reduzirParaEnvio(row.dataUrl, 640);
+        img.src = thumb;
+        await GT.db.captures.update(key, { thumb });
+      } catch { /* sem capa: fica o marcador */ }
     }
     async function carregarImagens() {
       let prontas = 0;
