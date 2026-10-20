@@ -860,6 +860,25 @@
     }
   };
 
+  // Reduz a imagem para o envio (largura máxima em px), em JPEG. Mantém a proporção.
+  async function reduzirParaEnvio(dataUrl, maxWidth) {
+    const image = await GT.loadImage(dataUrl);
+    const w0 = image.naturalWidth || image.width, h0 = image.naturalHeight || image.height;
+    const scale = Math.min(1, maxWidth / w0);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(w0 * scale); canvas.height = Math.round(h0 * scale);
+    canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.82);
+  }
+
+  // Página HTML autocontida: CSS e imagens embutidos, lightbox simples e links para o instante no YouTube.
+  function montarHtmlGaleria({ titulo, canal, videoId, itens, gerado }) {
+    const esc = (valor) => String(valor ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const fmt = (s) => { const t = Math.floor(s), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60; const p = (n) => String(n).padStart(2, '0'); return h ? `${h}:${p(m)}:${p(sec)}` : `${p(m)}:${p(sec)}`; };
+    const cards = itens.map((item, i) => `<figure class="card"><a href="#" data-full="${item.img}" data-i="${i}"><img src="${item.img}" alt="Print em ${fmt(item.time)}" loading="lazy"></a><figcaption><a href="https://www.youtube.com/watch?v=${esc(item.videoId)}&t=${Math.floor(item.time)}s" target="_blank" rel="noopener">▶ ${fmt(item.time)}</a><span>${item.width}×${item.height}${item.score != null ? ` · score ${item.score}` : ''}${item.manual ? ' · manual' : ''}</span></figcaption></figure>`).join('\n');
+    return `<!doctype html>\n<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>${esc(titulo)} · galeria de prints</title>\n<style>\n*{box-sizing:border-box}body{margin:0;background:#0f0f0f;color:#f1f1f1;font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}\nheader{padding:24px 28px 8px}h1{margin:0 0 4px;font-size:22px}header p{margin:0;color:#aaa;font-size:13px}\n.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;padding:16px 28px 40px}\n.card{margin:0;background:#1b1b1b;border:1px solid #2a2a2a;border-radius:10px;overflow:hidden}\n.card img{display:block;width:100%;height:auto;cursor:zoom-in}\nfigcaption{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:8px 10px;font-size:12px;color:#aaa}\nfigcaption a{color:#ff4d5e;font-weight:700;text-decoration:none}\n.lightbox{position:fixed;inset:0;background:rgba(0,0,0,.92);display:none;align-items:center;justify-content:center;padding:24px;cursor:zoom-out}\n.lightbox.on{display:flex}.lightbox img{max-width:100%;max-height:100%;border-radius:6px}\n</style></head><body>\n<header><h1>${esc(titulo)}</h1><p>${canal ? esc(canal) + ' · ' : ''}${itens.length} prints · gerado em ${esc(gerado.toLocaleString('pt-BR'))}</p></header>\n<main class="grid">\n${cards}\n</main>\n<div class="lightbox" id="lb"><img alt=""></div>\n<script>\n(function(){var lb=document.getElementById('lb'),im=lb.querySelector('img');\ndocument.querySelectorAll('a[data-full]').forEach(function(a){a.addEventListener('click',function(e){e.preventDefault();im.src=a.getAttribute('data-full');lb.classList.add('on');});});\nlb.addEventListener('click',function(){lb.classList.remove('on');});\ndocument.addEventListener('keydown',function(e){if(e.key==='Escape')lb.classList.remove('on');});})();\n</script></body></html>`;
+  }
+
   /* ====================== GALERIA DA TELA CHEIA (aba da extensão) ====================== */
   // Mostra as capturas guardadas pela página do vídeo, com as mesmas saídas: baixar em
   // resolução nativa, copiar, Arsenal e zip. As imagens viajam do banco uma a uma — a grade
@@ -887,7 +906,8 @@
       el('span', { class: 'gt-note' }, 'Preview'), tamanhosPreview,
       el('button', { class: 'gt-chip', onclick: selecionarTudo }, 'Selecionar tudo'),
       el('button', { class: 'gt-chip', onclick: baixarZip }, '⇩ Seleção em .zip'),
-      el('button', { class: 'gt-chip', onclick: salvarSelecao }, '★ Seleção no Arsenal')
+      el('button', { class: 'gt-chip', onclick: salvarSelecao }, '★ Seleção no Arsenal'),
+      el('button', { class: 'gt-chip', title: 'Gera uma página HTML única com a galeria (seleção, ou tudo que está visível). Abre em qualquer navegador, sem depender do YouTube.', onclick: exportarGaleria }, '⤴ Galeria compartilhável')
     );
     const grid = el('div', { class: 'gt-grid gt-gallery-grid' });
     const root = el('div', { class: 'gt-gallery' }, cabecalho, status, filtros, barra, grid);
@@ -1016,6 +1036,37 @@
     }
     async function salvarSelecao() { const lista = listaOrdenada().filter((m) => selecionados.has(m.key)); if (!lista.length) { status.textContent = 'Marque ao menos um print pela caixa de seleção.'; return; } let feitos = 0; try { for (const meta of lista) { await salvarNoArsenal(meta); feitos++; status.textContent = `Salvando no Arsenal ${feitos}/${lista.length}…`; } status.textContent = `${feitos} prints no Arsenal.`; } catch (error) { status.textContent = `Salvei ${feitos}/${lista.length}; parou em: ${error.message || error}`; } }
     async function baixarZip() { const lista = listaOrdenada().filter((m) => selecionados.has(m.key)).sort((a, b) => a.time - b.time); if (!lista.length) { status.textContent = 'Marque ao menos um print pela caixa de seleção.'; return; } try { const entradas = []; for (let i = 0; i < lista.length; i++) entradas.push({ nome: `${String(i + 1).padStart(3, '0')}-${GT.timeLabel(lista[i].time).replace(/:/g, 'm')}s.jpg`, blob: await (await fetch(exigirImagem(lista[i]))).blob() }); status.textContent = `Empacotando ${entradas.length} prints…`; const zip = await GT.makeZip(entradas); const url = URL.createObjectURL(zip), link = el('a', { href: url, download: `${GT.safeName(lista[0].videoTitle || videoId)}-prints.zip` }); document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000); status.textContent = `${entradas.length} prints no zip, em resolução nativa.`; } catch (error) { status.textContent = `O zip falhou: ${error.message || error}`; } }
+    // Galeria compartilhável: uma página HTML só, com as imagens embutidas (reduzidas para caber
+    // num envio). Não depende do banco nem do YouTube — o arquivo leva tudo junto.
+    async function exportarGaleria() {
+      const marcados = listaOrdenada().filter((m) => selecionados.has(m.key));
+      const lista = (marcados.length ? marcados : listaOrdenada()).slice().sort((a, b) => a.time - b.time);
+      if (!lista.length) { status.textContent = 'Nenhum print para compartilhar neste filtro.'; return; }
+      try {
+        const itens = [];
+        for (let i = 0; i < lista.length; i++) {
+          const meta = lista[i];
+          status.textContent = `Preparando a galeria ${i + 1}/${lista.length}…`;
+          if (!imagens.has(meta.key)) {
+            const row = await GT.db.captures.get(meta.key);
+            if (row?.dataUrl) imagens.set(meta.key, row.dataUrl);
+          }
+          const dataUrl = imagens.get(meta.key);
+          if (!dataUrl) continue;
+          itens.push({ videoId: meta.videoId, time: meta.time, width: meta.width, height: meta.height, score: meta.score ?? null, manual: !!meta.manual, img: await reduzirParaEnvio(dataUrl, 960) });
+        }
+        if (!itens.length) { status.textContent = 'Não consegui ler as imagens para a galeria.'; return; }
+        const titulo = lista[0].videoTitle || videoId || 'Galeria';
+        const html = montarHtmlGaleria({ titulo, canal: lista[0].channel || '', videoId: lista[0].videoId, itens, gerado: new Date() });
+        const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = el('a', { href: url, download: `${GT.safeName(titulo)}-galeria.html` });
+        document.body.append(link); link.click(); link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        const mb = (blob.size / 1e6).toFixed(1);
+        status.textContent = `Galeria com ${itens.length} prints salva (${mb} MB). É um arquivo único: envie para quem quiser, ele abre no navegador.`;
+      } catch (error) { status.textContent = `Não consegui gerar a galeria: ${error.message || error}`; }
+    }
     carregar();
     return { el: root, destroy() { alive = false; } };
   }
