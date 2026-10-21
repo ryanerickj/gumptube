@@ -337,7 +337,11 @@
         running = true; cancelled = false;
         releaseBlobs();                      // devolve a memória da varredura anterior
         frames = []; selected.clear();
-        iniciarPersistencia();
+        // A varredura fica presa ao vídeo em que começou: se o YouTube trocar de vídeo (autoplay),
+        // ela para ali e o que já foi capturado continua guardado para ESTE vídeo.
+        const scanVideoId = ctx.videoId;
+        const trocouVideo = () => !!scanVideoId && GT.currentVideoId() !== scanVideoId;
+        iniciarPersistencia(scanVideoId);
         runButton.textContent = 'Cancelar';
         ctx.setProgress(0);
         renderChips(); render();
@@ -403,7 +407,7 @@
               faceDone: false,
               score: quality.score
             });
-            salvarNaTelaCheia(found[found.length - 1]);
+            salvarNaTelaCheia(found[found.length - 1], scanVideoId);
             frames = A().clusterFrames(found, step);
           };
 
@@ -424,7 +428,7 @@
             await new Promise((resolve) => {
               const encerrar = () => resolve();
               const passo = () => {
-                if (cancelled || !alive || !fila.length) return encerrar();
+                if (cancelled || !alive || trocouVideo() || !fila.length) return encerrar();
                 const agora = player.currentTime;
                 if (agora >= fim + 0.5 || player.ended) return encerrar();
 
@@ -457,7 +461,7 @@
           } else {
             ctx.setStatus(`Capturando ${times.length} frames (1 a cada ${GT.decimal(step, 1)} s)…`);
             for (let i = 0; i < times.length; i++) {
-              if (cancelled || !alive) break;
+              if (cancelled || !alive || trocouVideo()) break;
               let capture;
               try {
                 capture = await A().captureAt(player, times[i], previewWidth, previousHash);
@@ -466,6 +470,7 @@
                 skipped++;
                 continue;                       // trecho sem dados: pula sem derrubar a varredura
               }
+              if (trocouVideo()) break;   // o player já está em outro vídeo: este frame não é deste
               const repetido = capture.stale;   // player não entregou frame novo neste ponto
               if (repetido) skipped++;
               previousHash = capture.hash;
@@ -478,7 +483,7 @@
             }
           }
 
-          if (cancelled || !alive) throw new Error('cancelado');
+          if (cancelled || !alive || trocouVideo()) throw new Error('cancelado');
 
           // Passada 2 — rosto e olhar apenas nos candidatos
           ctx.setStatus('Carregando o modelo facial local…');
@@ -496,7 +501,7 @@
               /* frame sem rosto detectável segue com a pontuação de qualidade */
             }
             frame.faceDone = true;
-            atualizarNaTelaCheia(frame);
+            atualizarNaTelaCheia(frame, scanVideoId);
             ctx.setProgress(60 + Math.round(((i + 1) / candidates.length) * 40));
             if (i % 5 === 0 || i === candidates.length - 1) {
               ctx.setStatus(`Analisando rosto e olhar ${i + 1}/${candidates.length}`);
@@ -510,15 +515,18 @@
           ctx.setStatus(`${frames.length} frames · ${scenes} cena${scenes === 1 ? '' : 's'} · ${camera} com olhar para a câmera`
             + (skipped ? ` · ${skipped} repetido${skipped === 1 ? '' : 's'} (o player não avançou)` : ''));
         } catch (error) {
-          if (error.message === 'cancelado') ctx.setStatus(`Análise cancelada com ${frames.length} frames`);
+          if (error.message === 'cancelado' && trocouVideo()) ctx.setStatus(`O vídeo mudou: a varredura parou em ${frames.length} frames e os prints deste vídeo já estão guardados.`);
+          else if (error.message === 'cancelado') ctx.setStatus(`Análise cancelada com ${frames.length} frames`);
           else ctx.setStatus(`Captura indisponível: ${error.message || error}`);
         } finally {
           if (boost) GT.restorePlayerQuality(boost).catch(() => {});   // devolve o automático
           try {
             player.playbackRate = rateOriginal || 1;
             player.muted = mutedOriginal;
-            await A().seek(player, original);
-            if (paused) player.pause(); else await player.play();
+            if (!trocouVideo()) {   // só devolve o ponto original se ainda for o mesmo vídeo
+              await A().seek(player, original);
+              if (paused) player.pause(); else await player.play();
+            }
           } catch { /* o vídeo pode ter mudado no meio */ }
           running = false;
           runButton.textContent = 'Analisar vídeo';
@@ -556,20 +564,22 @@
         });
       }
 
-      // Gravação incremental no banco central: cada print vai para a tela cheia (⧉) assim que é
-      // capturado, em fila (uma gravação por vez) e sem esperar o fim da varredura. Antes, cada
-      // captura manual regravava TODOS os prints da sessão, o que travava a tela.
+      // Gravação no banco central: cada print vai para a tela cheia (⧉) assim que é capturado,
+      // em fila (uma gravação por vez). A fila NÃO depende da view: quem encerra a varredura
+      // (troca de vídeo, cancelamento) não derruba o que já foi capturado.
       const LIMITE_TELA_CHEIA = 500;
       let gravados = 0;
       let filaGravacao = Promise.resolve();
       let falhaGravacao = null;
-      const chaveTelaCheia = (frame) => `${ctx.videoId}|${Math.round(frame.time * 1000)}`;
+      let metaGravacao = null;
+      const chaveTelaCheia = (videoId, time) => `${videoId}|${Math.round(time * 1000)}`;
 
-      function iniciarPersistencia() {
+      function iniciarPersistencia(videoId) {
         gravados = 0; falhaGravacao = null;
-        if (!ctx.videoId) { filaGravacao = Promise.resolve(); return; }
+        metaGravacao = videoId ? { videoId, titulo: GT.pageTitle(), canal: GT.pageChannel() || '' } : null;
+        if (!videoId) { filaGravacao = Promise.resolve(); return; }
         // a varredura nova substitui a anterior DESTE vídeo (o acervo permanente é o Arsenal)
-        filaGravacao = GT.db.captures.clear(ctx.videoId).catch((error) => { falhaGravacao = error; });
+        filaGravacao = GT.db.captures.clear(videoId).catch((error) => { falhaGravacao = error; });
       }
 
       function enfileirar(task) {
@@ -579,23 +589,23 @@
         return filaGravacao;
       }
 
-      function salvarNaTelaCheia(frame) {
-        if (!ctx.videoId || !frame?.fullBlob || gravados >= LIMITE_TELA_CHEIA) return;
+      function salvarNaTelaCheia(frame, videoId = ctx.videoId) {
+        if (!videoId || !frame?.fullBlob || gravados >= LIMITE_TELA_CHEIA) return;
         gravados++;
-        const tituloVideo = GT.pageTitle();
-        const canal = GT.pageChannel() || '';
+        const meta = metaGravacao && metaGravacao.videoId === videoId
+          ? metaGravacao
+          : { titulo: GT.pageTitle(), canal: GT.pageChannel() || '' };
         enfileirar(async () => {
-          if (!alive) return;
           const dataUrl = await blobToDataUrl(frame.fullBlob);
           // miniatura leve (640 px) para a lista de vídeos — não precisa carregar a imagem cheia
           const thumb = frame.previewUrl ? await blobToDataUrl(await (await fetch(frame.previewUrl)).blob()) : null;
           await GT.db.captures.put({
-            key: chaveTelaCheia(frame),
-            videoId: ctx.videoId,
+            key: chaveTelaCheia(videoId, frame.time),
+            videoId,
             time: frame.time,
             takenAt: Date.now(),
-            videoTitle: tituloVideo,
-            channel: canal,
+            videoTitle: meta.titulo,
+            channel: meta.canal,
             dataUrl,
             thumb,
             width: frame.width,
@@ -609,15 +619,15 @@
       }
 
       // score e rosto mudam depois da análise facial: só os metadados são reenviados
-      function atualizarNaTelaCheia(frame) {
-        if (!ctx.videoId || !frame) return;
-        const key = chaveTelaCheia(frame);
+      function atualizarNaTelaCheia(frame, videoId) {
+        if (!videoId || !frame) return;
+        const key = chaveTelaCheia(videoId, frame.time);
         enfileirar(() => GT.db.captures.update(key, { score: frame.score ?? null, lookingAtCamera: !!frame.face?.lookingAtCamera }));
       }
 
       function concluirPersistencia() {
         filaGravacao.then(() => {
-          if (!alive || !ctx.videoId) return;
+          if (!alive) return;
           if (falhaGravacao) ctx.setStatus(`Capturas feitas, mas não guardei tudo para a tela cheia: ${falhaGravacao.message || falhaGravacao}`);
           else if (gravados) {
             const corte = frames.length > LIMITE_TELA_CHEIA ? ` (limite de ${LIMITE_TELA_CHEIA}; a grade aqui segue completa)` : '';
@@ -900,12 +910,93 @@
     return canvas.toDataURL('image/jpeg', 0.82);
   }
 
-  // Página HTML autocontida: CSS e imagens embutidos, lightbox simples e links para o instante no YouTube.
+  // Página HTML autocontida: CSS, imagens e script embutidos. Filtros, ordem, download por print
+  // e lightbox funcionam offline. Cada imagem entra UMA vez (o link de download usa a mesma imagem).
   function montarHtmlGaleria({ titulo, canal, videoId, itens, gerado }) {
     const esc = (valor) => String(valor ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const fmt = (s) => { const t = Math.floor(s), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60; const p = (n) => String(n).padStart(2, '0'); return h ? `${h}:${p(m)}:${p(sec)}` : `${p(m)}:${p(sec)}`; };
-    const cards = itens.map((item, i) => `<figure class="card"><a href="#" data-full="${item.img}" data-i="${i}"><img src="${item.img}" alt="Print em ${fmt(item.time)}" loading="lazy"></a><figcaption><a href="https://www.youtube.com/watch?v=${esc(item.videoId)}&t=${Math.floor(item.time)}s" target="_blank" rel="noopener">▶ ${fmt(item.time)}</a><span>${item.width}×${item.height}${item.score != null ? ` · score ${item.score}` : ''}${item.manual ? ' · manual' : ''}</span></figcaption></figure>`).join('\n');
-    return `<!doctype html>\n<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>${esc(titulo)} · galeria de prints</title>\n<style>\n*{box-sizing:border-box}body{margin:0;background:#0f0f0f;color:#f1f1f1;font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}\nheader{padding:24px 28px 8px}h1{margin:0 0 4px;font-size:22px}header p{margin:0;color:#aaa;font-size:13px}\n.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;padding:16px 28px 40px}\n.card{margin:0;background:#1b1b1b;border:1px solid #2a2a2a;border-radius:10px;overflow:hidden}\n.card img{display:block;width:100%;height:auto;cursor:zoom-in}\nfigcaption{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:8px 10px;font-size:12px;color:#aaa}\nfigcaption a{color:#ff4d5e;font-weight:700;text-decoration:none}\n.lightbox{position:fixed;inset:0;background:rgba(0,0,0,.92);display:none;align-items:center;justify-content:center;padding:24px;cursor:zoom-out}\n.lightbox.on{display:flex}.lightbox img{max-width:100%;max-height:100%;border-radius:6px}\n</style></head><body>\n<header><h1>${esc(titulo)}</h1><p>${canal ? esc(canal) + ' · ' : ''}${itens.length} prints · gerado em ${esc(gerado.toLocaleString('pt-BR'))}</p></header>\n<main class="grid">\n${cards}\n</main>\n<div class="lightbox" id="lb"><img alt=""></div>\n<script>\n(function(){var lb=document.getElementById('lb'),im=lb.querySelector('img');\ndocument.querySelectorAll('a[data-full]').forEach(function(a){a.addEventListener('click',function(e){e.preventDefault();im.src=a.getAttribute('data-full');lb.classList.add('on');});});\nlb.addEventListener('click',function(){lb.classList.remove('on');});\ndocument.addEventListener('keydown',function(e){if(e.key==='Escape')lb.classList.remove('on');});})();\n</script></body></html>`;
+    // "melhores" = 25% com maior score (mesma regra da galeria da tela cheia)
+    const comScore = itens.map((item, i) => ({ i, score: item.score })).filter((x) => Number.isFinite(x.score)).sort((a, b) => b.score - a.score);
+    const melhores = new Set(comScore.slice(0, Math.max(1, Math.ceil(comScore.length * 0.25))).map((x) => x.i));
+    const cards = itens.map((item, i) => {
+      const legenda = [`${item.width}×${item.height}`, item.score != null ? `score ${item.score}` : null, item.manual ? 'manual' : null, item.camera ? 'olhar para a câmera' : null].filter(Boolean).join(' · ');
+      return `<figure class="card" data-time="${item.time}" data-score="${item.score ?? ''}" data-manual="${item.manual ? 1 : 0}" data-camera="${item.camera ? 1 : 0}" data-best="${melhores.has(i) ? 1 : 0}" data-nome="${esc(item.nome)}">`
+        + `<a class="open" href="#" title="Ampliar"><img src="${item.img}" alt="Print em ${fmt(item.time)}" loading="lazy"></a>`
+        + `<figcaption><a class="yt" href="https://www.youtube.com/watch?v=${esc(item.videoId)}&amp;t=${Math.floor(item.time)}s" target="_blank" rel="noopener">▶ ${fmt(item.time)}</a>`
+        + `<span>${esc(legenda)}</span><a class="dl" href="#" title="Baixar este print">⇩</a></figcaption></figure>`;
+    }).join('\n');
+    const n = itens.length;
+    const totais = { todos: n, melhores: melhores.size, manual: itens.filter((x) => x.manual).length, camera: itens.filter((x) => x.camera).length };
+    return `<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(titulo)} · galeria de prints</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0f0f0f;color:#f1f1f1;font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+header{padding:22px 28px 4px}h1{margin:0 0 4px;font-size:22px}header p{margin:0;color:#aaa;font-size:13px}
+.bar{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:12px 28px;background:#0f0f0f;border-bottom:1px solid #222}
+.bar button,.bar select{font:inherit;color:#f1f1f1;background:#1d1d1d;border:1px solid #333;border-radius:999px;padding:6px 12px;cursor:pointer}
+.bar button.on,.bar button:hover{border-color:#ff4d5e;color:#ff4d5e}
+.bar em{font-style:normal;color:#888;margin-left:4px}.bar label{color:#aaa;font-size:13px}
+#contagem{margin-left:auto;color:#888;font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;padding:16px 28px 40px}
+.card{margin:0;background:#1b1b1b;border:1px solid #2a2a2a;border-radius:10px;overflow:hidden}
+.card img{display:block;width:100%;height:auto;cursor:zoom-in}
+figcaption{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:8px 10px;font-size:12px;color:#aaa}
+figcaption a{color:#ff4d5e;font-weight:700;text-decoration:none}
+figcaption .dl{font-size:16px;padding:0 4px}
+figcaption span{flex:1;text-align:right;margin-right:4px}
+.lightbox{position:fixed;inset:0;background:rgba(0,0,0,.92);display:none;align-items:center;justify-content:center;padding:24px;cursor:zoom-out;z-index:9}
+.lightbox.on{display:flex}.lightbox img{max-width:100%;max-height:100%;border-radius:6px}
+</style></head><body>
+<header><h1>${esc(titulo)}</h1><p>${canal ? esc(canal) + ' · ' : ''}${n} prints · gerado em ${esc(gerado.toLocaleString('pt-BR'))}</p></header>
+<nav class="bar">
+  <button class="on" data-f="todos">Todos<em>${totais.todos}</em></button>
+  <button data-f="melhores">Melhores<em>${totais.melhores}</em></button>
+  <button data-f="manual">Manuais<em>${totais.manual}</em></button>
+  <button data-f="camera">Olhar para a câmera<em>${totais.camera}</em></button>
+  <label>Ordem <select id="ordem"><option value="tempo">Por tempo</option><option value="score">Melhores primeiro</option></select></label>
+  <button id="baixar">⇩ Baixar visíveis</button>
+  <span id="contagem"></span>
+</nav>
+<main class="grid" id="grid">
+${cards}
+</main>
+<div class="lightbox" id="lb"><img alt=""></div>
+<script>
+(function(){
+  var grid=document.getElementById('grid');
+  var cards=Array.prototype.slice.call(grid.querySelectorAll('.card'));
+  var filtro='todos', ordem='tempo';
+  var contagem=document.getElementById('contagem'), lb=document.getElementById('lb');
+  function passa(c){ if(filtro==='todos') return true; var k=filtro==='melhores'?'best':filtro; return c.getAttribute('data-'+k)==='1'; }
+  function pontos(c){ var s=parseFloat(c.getAttribute('data-score')); return isNaN(s)?-1:s; }
+  function render(){
+    cards.slice().sort(function(a,b){ return ordem==='score' ? pontos(b)-pontos(a) : parseFloat(a.getAttribute('data-time'))-parseFloat(b.getAttribute('data-time')); })
+      .forEach(function(c){ grid.appendChild(c); c.style.display = passa(c)?'':'none'; });
+    contagem.textContent = cards.filter(passa).length + ' de ' + cards.length + ' prints';
+  }
+  document.querySelectorAll('[data-f]').forEach(function(b){ b.addEventListener('click', function(){
+    filtro=b.getAttribute('data-f');
+    document.querySelectorAll('[data-f]').forEach(function(x){ x.classList.toggle('on', x===b); });
+    render();
+  }); });
+  document.getElementById('ordem').addEventListener('change', function(e){ ordem=e.target.value; render(); });
+  function baixar(c){ var a=document.createElement('a'); a.href=c.querySelector('img').src; a.download=c.getAttribute('data-nome')||'print.jpg'; document.body.appendChild(a); a.click(); a.remove(); }
+  grid.addEventListener('click', function(e){
+    var dl=e.target.closest('.dl');
+    if(dl){ e.preventDefault(); baixar(dl.closest('.card')); return; }
+    var open=e.target.closest('.open');
+    if(open){ e.preventDefault(); lb.querySelector('img').src=open.querySelector('img').src; lb.classList.add('on'); }
+  });
+  lb.addEventListener('click', function(){ lb.classList.remove('on'); });
+  document.addEventListener('keydown', function(e){ if(e.key==='Escape') lb.classList.remove('on'); });
+  document.getElementById('baixar').addEventListener('click', function(){
+    var visiveis=cards.filter(function(c){ return c.style.display!=='none'; });
+    visiveis.forEach(function(c,i){ setTimeout(function(){ baixar(c); }, i*400); });
+  });
+  render();
+})();
+</script></body></html>`;
   }
 
   /* ====================== GALERIA DA TELA CHEIA (aba da extensão) ====================== */
@@ -936,7 +1027,8 @@
       el('button', { class: 'gt-chip', onclick: selecionarTudo }, 'Selecionar tudo'),
       el('button', { class: 'gt-chip', onclick: baixarZip }, '⇩ Seleção em .zip'),
       el('button', { class: 'gt-chip', onclick: salvarSelecao }, '★ Seleção no Arsenal'),
-      el('button', { class: 'gt-chip', title: 'Gera uma página HTML única com a galeria (seleção, ou tudo que está visível). Abre em qualquer navegador, sem depender do YouTube.', onclick: exportarGaleria }, '⤴ Galeria compartilhável')
+      el('button', { class: 'gt-chip', title: 'Galeria única em HTML, imagens reduzidas (960 px). Filtros, ordem e download por print.', onclick: () => exportarGaleria(960) }, '⤴ Galeria (leve)'),
+      el('button', { class: 'gt-chip', title: 'Galeria única em HTML com as capturas em resolução original (arquivo bem maior).', onclick: () => exportarGaleria(0) }, '⤴ Galeria (original)')
     );
     const grid = el('div', { class: 'gt-grid gt-gallery-grid' });
     const root = el('div', { class: 'gt-gallery' }, cabecalho, status, filtros, barra, grid);
@@ -1085,9 +1177,9 @@
     }
     async function salvarSelecao() { const lista = listaOrdenada().filter((m) => selecionados.has(m.key)); if (!lista.length) { status.textContent = 'Marque ao menos um print pela caixa de seleção.'; return; } let feitos = 0; try { for (const meta of lista) { await salvarNoArsenal(meta); feitos++; status.textContent = `Salvando no Arsenal ${feitos}/${lista.length}…`; } status.textContent = `${feitos} prints no Arsenal.`; } catch (error) { status.textContent = `Salvei ${feitos}/${lista.length}; parou em: ${error.message || error}`; } }
     async function baixarZip() { const lista = listaOrdenada().filter((m) => selecionados.has(m.key)).sort((a, b) => a.time - b.time); if (!lista.length) { status.textContent = 'Marque ao menos um print pela caixa de seleção.'; return; } try { const entradas = []; for (let i = 0; i < lista.length; i++) entradas.push({ nome: `${String(i + 1).padStart(3, '0')}-${GT.timeLabel(lista[i].time).replace(/:/g, 'm')}s.jpg`, blob: await (await fetch(exigirImagem(lista[i]))).blob() }); status.textContent = `Empacotando ${entradas.length} prints…`; const zip = await GT.makeZip(entradas); const url = URL.createObjectURL(zip), link = el('a', { href: url, download: `${GT.safeName(lista[0].videoTitle || videoId)}-prints.zip` }); document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000); status.textContent = `${entradas.length} prints no zip, em resolução nativa.`; } catch (error) { status.textContent = `O zip falhou: ${error.message || error}`; } }
-    // Galeria compartilhável: uma página HTML só, com as imagens embutidas (reduzidas para caber
-    // num envio). Não depende do banco nem do YouTube — o arquivo leva tudo junto.
-    async function exportarGaleria() {
+    // Galeria compartilhável: uma página HTML só, com as imagens embutidas. Não depende do banco
+    // nem do YouTube. "leve" reduz para 960 px (arquivo enviável); "original" mantém a captura cheia.
+    async function exportarGaleria(largura = 960) {
       const marcados = listaOrdenada().filter((m) => selecionados.has(m.key));
       const lista = (marcados.length ? marcados : listaOrdenada()).slice().sort((a, b) => a.time - b.time);
       if (!lista.length) { status.textContent = 'Nenhum print para compartilhar neste filtro.'; return; }
@@ -1102,7 +1194,13 @@
           }
           const dataUrl = imagens.get(meta.key);
           if (!dataUrl) continue;
-          itens.push({ videoId: meta.videoId, time: meta.time, width: meta.width, height: meta.height, score: meta.score ?? null, manual: !!meta.manual, img: await reduzirParaEnvio(dataUrl, 960) });
+          const titulo = meta.videoTitle || videoId || 'Galeria';
+          itens.push({
+            videoId: meta.videoId, time: meta.time, width: meta.width, height: meta.height,
+            score: meta.score ?? null, manual: !!meta.manual, camera: !!meta.lookingAtCamera,
+            nome: `${GT.safeName(titulo)}-${GT.timeLabel(meta.time).replace(/:/g, 'm')}s.jpg`,
+            img: largura ? await reduzirParaEnvio(dataUrl, largura) : dataUrl
+          });
         }
         if (!itens.length) { status.textContent = 'Não consegui ler as imagens para a galeria.'; return; }
         const titulo = lista[0].videoTitle || videoId || 'Galeria';
@@ -1113,7 +1211,7 @@
         document.body.append(link); link.click(); link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
         const mb = (blob.size / 1e6).toFixed(1);
-        status.textContent = `Galeria com ${itens.length} prints salva (${mb} MB). É um arquivo único: envie para quem quiser, ele abre no navegador.`;
+        status.textContent = `Galeria com ${itens.length} prints salva (${mb} MB, ${largura ? `${largura} px` : 'original'}). É um arquivo único: envie para quem quiser.`;
       } catch (error) { status.textContent = `Não consegui gerar a galeria: ${error.message || error}`; }
     }
     carregar();
